@@ -1,0 +1,144 @@
+# irie
+
+A Spotify client for your terminal. irie plays music itself as a Spotify
+Connect device and draws a live spectrum of the audio as it plays. You can
+browse your playlists, search, manage the queue, check your profile and stats,
+and start or join a Spotify Jam without leaving the terminal.
+
+```
+ irie    1 Now Playing │ 2 Library │ 3 Search │ 4 Queue │ 5 Profile │ 6 Jam          ♪ irie
+╭ Now Playing · spectrum ───────────────────────────────────────────────────────────────╮
+│                                  Three Little Birds                                   │
+│                                Bob Marley & The Wailers                               │
+│                                    Exodus · 1977                                      │
+│            ██ ▆▆                   ▆▆ ██                      ██ ▅▅                   │
+│         ▆▆ ██ ██                   ██ ██ ▅▅                ▆▆ ██ ██                   │
+│      ▃▃ ██ ██ ██ ██             ██ ██ ██ ██ ▂▂          ▃▃ ██ ██ ██ ██             ██ │
+│   ▄▄ ██ ██ ██ ██ ██ ██ ▆▆ ▇▇ ██ ██ ██ ██ ██ ██ ██ ▁▁ ██ ██ ██ ██ ██ ██ ██ ▅▅ ██ ██ ██ │
+╰───────────────────────────────────────────────────────────────────────────────────────╯
+│ ▶ Three Little Birds  Bob Marley & The Wailers              ⇄ shuffle  ↻ repeat  vol 60% │
+│    0:42  ━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────────────── 3:00 │
+```
+
+## Features
+
+- **Listen**: irie streams audio itself (via [librespot](https://github.com/librespot-org/librespot))
+  at up to 320 kbps, and shows up as a device in every Spotify app, so your
+  phone can control it too. You can also move playback to any other device (`d`).
+- **Visualize**: a real FFT of the PCM that's playing, in three styles (spectrum
+  bars, mirrored bars, oscilloscope), adjusted for the audio output delay so it
+  stays in sync with what you hear.
+- **Library**: your playlists and Liked Songs. Open one, play from any track, or
+  queue tracks.
+- **Search**: tracks, artists, albums and playlists.
+- **Queue**: see what's up next and add tracks from anywhere with `a`.
+- **Profile**: your account, top artists and top tracks (4 weeks / 6 months /
+  all time) and recently played.
+- **Jam** *(experimental)*: start a Jam and share the invite link, join a
+  friend's Jam from a link, see who's listening, and leave or end it.
+- **CLI**: one-off commands for scripts and status bars (see below).
+
+## Requirements
+
+- **Spotify Premium**. Spotify only allows Premium accounts to stream through
+  third-party Connect clients.
+- Rust 1.85 or newer (the repo pins 1.90 via `rust-toolchain.toml`).
+- Linux only: ALSA headers (`libasound2-dev` / `alsa-lib-devel`).
+
+## Install
+
+```sh
+git clone https://github.com/jovanfrandika/irie && cd irie
+cargo install --path . --locked
+```
+
+## Usage
+
+```sh
+irie          # open the player (logs in through your browser the first time)
+irie login    # log in again / switch account
+irie logout
+```
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| `1`–`6`, `tab` | switch view |
+| `space` | play / pause |
+| `n` / `p` | next / previous |
+| `←` `→` (or `,` `.`) | seek 10 s |
+| `+` / `-` | volume |
+| `s` / `r` | shuffle / cycle repeat |
+| `d` | choose playback device |
+| `v` | cycle visualizer style |
+| `/` | search |
+| `j` `k` `↑` `↓` `g` `G` | move in lists |
+| `enter` | play / open |
+| `a` | add to queue |
+| `esc` | back |
+| `t` | (Profile) change time range |
+| `c` / `i` / `y` / `e` | (Jam) start / join / copy link / end or leave |
+| `?` | help |
+| `q` | quit |
+
+### Command line
+
+These work against whichever device is active, so they're useful for scripts
+and status bars:
+
+```sh
+irie status                    # ▶ Song — Artist  [1:02 / 3:45]
+irie play                      # resume
+irie play redemption song      # search and play the top match
+irie pause | next | prev
+irie queue                     # show the queue
+irie queue add is this love    # search and queue the top match
+irie me                        # profile + top artists/tracks
+irie playlists
+irie devices
+irie jam start                 # prints (and copies) the invite link
+irie jam join <link>
+irie jam status | leave
+```
+
+## Configuration
+
+Optional. Copy [`config.example.toml`](config.example.toml) to
+`~/Library/Application Support/irie/config.toml` (macOS) or
+`~/.config/irie/config.toml` (Linux) to change the device name, bitrate,
+volume, cache size and so on. Set `IRIE_CONFIG_DIR` to use a different directory.
+
+Your login token is saved with `0600` permissions in the same directory.
+
+## Notes and limitations
+
+- **Visualizer**: Spotify no longer offers audio analysis to third-party apps,
+  so irie analyses the audio it decodes itself. That means the visualizer only
+  works when irie is the device that's playing. When music plays elsewhere, press
+  `d` to move it to irie.
+- **Jam**: Spotify has no public API for Jams. irie uses the same internal
+  endpoints as the official apps, so this may stop working whenever Spotify
+  changes them. Friends join with the invite link from their own Spotify app.
+- **Client ID**: by default irie logs in with the Spotify desktop client ID that
+  librespot uses, so you don't need to register a developer app. You can set
+  your own `client_id` in the config. Its redirect URI must be
+  `http://127.0.0.1:8989/login`, and some features (such as Jam and streaming)
+  may not be available to custom apps.
+- No social features (friend activity, messaging) by design.
+
+## Development
+
+```sh
+cargo run            # debug build
+cargo test           # unit tests + headless UI render test
+cargo clippy --all-targets -- -D warnings
+```
+
+Code map: `engine.rs` (librespot session, Connect device, PCM tap) ·
+`visualizer.rs` (FFT + smoothing) · `api.rs` (Web API) · `jam.rs` (Jam) ·
+`app.rs` (state + input) · `ui.rs` (rendering) · `auth.rs` (OAuth).
+
+## License
+
+MIT

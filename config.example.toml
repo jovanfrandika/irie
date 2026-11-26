@@ -1,0 +1,11 @@
+# Copy to ~/Library/Application Support/irie/config.toml (macOS)
+# or ~/.config/irie/config.toml (Linux). Every key is optional.
+
+device_name = "irie"     # name shown in Spotify Connect device lists
+bitrate = 320            # 96, 160 or 320
+initial_volume = 60      # percent
+normalisation = false    # volume normalisation between tracks
+autoconnect = true       # take over playback on start if nothing is playing
+audio_cache_mb = 1024    # 0 disables the audio cache
+oauth_port = 8989        # local port for the login redirect
+# client_id = "..."      # use your own Spotify app instead of the default
