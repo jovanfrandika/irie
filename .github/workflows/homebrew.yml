@@ -1,0 +1,40 @@
+name: homebrew
+on:
+  workflow_call:
+    inputs:
+      tag: { required: true, type: string }
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag, e.g. v0.1.0", required: true, type: string }
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p '*.sha256' -D dist
+      - name: Update jovanfrandika/homebrew-tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:jovanfrandika/homebrew-tap.git tap
+          scripts/homebrew-formula.sh "$TAG" dist > tap/Formula/irie.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/irie.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for $TAG"
+            git push --dry-run origin main
+            exit 0
+          fi
+          git commit -m "irie ${TAG#v}"
+          git push origin main
