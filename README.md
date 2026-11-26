@@ -47,6 +47,20 @@ and start or join a Spotify Jam without leaving the terminal.
 
 ## Install
 
+Download a prebuilt package for macOS, Linux or Windows from the
+[latest release](https://github.com/jovanfrandika/irie/releases/latest), unpack
+it and put `irie` on your `PATH`:
+
+```sh
+# macOS (Apple silicon) example
+curl -L https://github.com/jovanfrandika/irie/releases/latest/download/irie-v0.1.0-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv irie-*/irie /usr/local/bin/
+```
+
+On macOS, if Gatekeeper blocks the binary, run `xattr -d com.apple.quarantine /usr/local/bin/irie`.
+
+Or build from source:
+
 ```sh
 git clone https://github.com/jovanfrandika/irie && cd irie
 cargo install --path . --locked
