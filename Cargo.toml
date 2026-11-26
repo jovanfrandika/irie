@@ -1,6 +1,6 @@
 [package]
 name = "irie"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A Spotify client for the terminal: play music, visualize audio, browse playlists, manage the queue, and host Jams."
 license = "MIT"

@@ -237,7 +237,7 @@ async fn command(cmd: Cmd, cfg: &Config, paths: &Paths, api: &Api) -> Result<()>
         }
         Cmd::Jam { action } => {
             let token = api.auth().access_token().await?;
-            let session = engine::connect_session(cfg, paths, token).await?;
+            let session = engine::connect_session(cfg, paths, &token).await?;
             let jam = jam::Jam::new(session);
             let show = |s: &jam::JamSession| {
                 println!("{} a Jam", if s.is_host { "Hosting" } else { "In" });
@@ -301,7 +301,17 @@ async fn tui(cfg: Config, paths: Paths, api: Api) -> Result<()> {
     // Start the audio engine before taking over the terminal so errors are readable.
     eprintln!("Connecting to Spotify…");
     let token = api.auth().access_token().await?;
-    let engine = match engine::Engine::start(&cfg, &paths, token).await {
+    let mut started = Err(anyhow::anyhow!("not started"));
+    for fresh in [false, true] {
+        let (creds, cached) = engine::streaming_credentials(&cfg, &paths, &token, fresh).await?;
+        started = engine::Engine::start(&cfg, &paths, creds).await;
+        if started.is_ok() || !cached {
+            break;
+        }
+        // Cached credentials went stale: forget them and log in again.
+        engine::forget_streaming(&paths);
+    }
+    let engine = match started {
         Ok((engine, task)) => {
             let tx2 = tx.clone();
             tokio::spawn(async move {

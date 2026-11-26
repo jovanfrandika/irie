@@ -131,6 +131,29 @@ volume, cache size and so on. Set `IRIE_CONFIG_DIR` to use a different directory
 
 Your login token is saved with `0600` permissions in the same directory.
 
+## Using your own Spotify app
+
+By default everything goes through the librespot client ID. If you'd rather the
+Web API side (library, search, queue, profile, playback control) run on your
+own registered app:
+
+1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard),
+   log in and accept the terms.
+2. **Create app**: any name and description. Set **Redirect URI** to exactly
+   `http://127.0.0.1:8989/login` and tick **Web API**.
+3. Copy the **Client ID**. You don't need the client secret, because irie uses PKCE.
+4. Add it to your config:
+   ```toml
+   client_id = "your-client-id"
+   ```
+5. Run `irie login`, then `irie`. The first time, irie opens a second browser
+   tab for a one-time *streaming* login. Spotify only allows audio streaming
+   and Jam through its own client IDs, so that part stays on librespot's ID.
+   Its credentials are cached and you won't be asked again.
+
+Apps in Spotify's development mode only work for the accounts you add under
+**User Management** in the dashboard (your own account works automatically).
+
 ## Notes and limitations
 
 - **Visualizer**: Spotify no longer offers audio analysis to third-party apps,
@@ -141,10 +164,8 @@ Your login token is saved with `0600` permissions in the same directory.
   endpoints as the official apps, so this may stop working whenever Spotify
   changes them. Friends join with the invite link from their own Spotify app.
 - **Client ID**: by default irie logs in with the Spotify desktop client ID that
-  librespot uses, so you don't need to register a developer app. You can set
-  your own `client_id` in the config. Its redirect URI must be
-  `http://127.0.0.1:8989/login`, and some features (such as Jam and streaming)
-  may not be available to custom apps.
+  librespot uses, so it works with no setup. To use your own Spotify developer
+  app for the Web API, see [Using your own Spotify app](#using-your-own-spotify-app).
 - No social features (friend activity, messaging) by design.
 
 ## Development

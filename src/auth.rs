@@ -27,7 +27,6 @@ pub const SCOPES: &[&str] = &[
     "playlist-read-collaborative",
     "playlist-modify-private",
     "playlist-modify-public",
-    "user-personalized",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,15 +100,46 @@ fn save(path: &PathBuf, t: &StoredToken) -> Result<()> {
     Ok(())
 }
 
+/// One-time login with Spotify's own client ID, used only to set up the audio
+/// session when the Web API runs on a custom client ID. librespot caches the
+/// resulting credentials, so this is needed once per machine.
+pub async fn streaming_login(cfg: &Config) -> Result<String> {
+    eprintln!(
+        "Your own client ID handles the Web API. Audio streaming needs a one-time\n\
+         login with Spotify's player client; opening your browser..."
+    );
+    let token = OAuthClientBuilder::new(
+        crate::config::DEFAULT_CLIENT_ID,
+        &cfg.redirect_uri(),
+        vec![
+            "streaming",
+            "user-read-private",
+            "user-read-playback-state",
+            "user-modify-playback-state",
+        ],
+    )
+    .open_in_browser()
+    .with_custom_message("irie can now stream audio. You can close this tab.")
+    .build()?
+    .get_access_token_async()
+    .await
+    .context("streaming login failed")?;
+    Ok(token.access_token)
+}
+
 pub fn load(paths: &Paths) -> Option<StoredToken> {
     let raw = std::fs::read(paths.token_file()).ok()?;
     serde_json::from_slice(&raw).ok()
 }
 
 pub fn logout(paths: &Paths) -> Result<()> {
-    let p = paths.token_file();
-    if p.exists() {
-        std::fs::remove_file(p)?;
+    for p in [
+        paths.token_file(),
+        paths.cache_dir.join("session").join("credentials.json"),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(p)?;
+        }
     }
     Ok(())
 }

@@ -2,7 +2,8 @@
 //! Connect device. Every decoded PCM packet is also copied into a [`Tap`] so
 //! the visualizer can analyse what is actually playing.
 
-use crate::config::{Config, Paths};
+use crate::auth;
+use crate::config::{Config, DEFAULT_CLIENT_ID, Paths};
 use anyhow::{Context, Result};
 use librespot_connect::{ConnectConfig, Spirc};
 use librespot_core::{
@@ -130,19 +131,20 @@ impl Engine {
     pub async fn start(
         cfg: &Config,
         paths: &Paths,
-        access_token: String,
+        credentials: Credentials,
     ) -> Result<(Self, impl Future<Output = ()> + Send + 'static)> {
         let device_id = device_id(&cfg.device_name);
         let session_config = SessionConfig {
             device_id: device_id.clone(),
-            client_id: cfg.client_id.clone(),
+            // Streaming only works with Spotify's own client ID, whatever the Web API uses.
+            client_id: DEFAULT_CLIENT_ID.to_string(),
             ..SessionConfig::default()
         };
 
         let audio_dir = (cfg.audio_cache_mb > 0).then(|| paths.cache_dir.join("audio"));
         let cache = Cache::new(
-            Some(paths.cache_dir.join("session")),
-            Some(paths.cache_dir.join("session")),
+            Some(session_dir(paths)),
+            Some(session_dir(paths)),
             audio_dir,
             (cfg.audio_cache_mb > 0).then_some(cfg.audio_cache_mb * 1024 * 1024),
         )
@@ -188,7 +190,7 @@ impl Engine {
         let (spirc, task) = Spirc::new(
             connect_config,
             session.clone(),
-            Credentials::with_access_token(access_token),
+            credentials,
             player.clone(),
             mixer.clone(),
         )
@@ -229,17 +231,59 @@ impl Engine {
 
 /// A bare session (no playback) for one-shot CLI commands that need
 /// Spotify's internal API, such as Jam.
-pub async fn connect_session(cfg: &Config, paths: &Paths, access_token: String) -> Result<Session> {
+pub async fn connect_session(cfg: &Config, paths: &Paths, web_token: &str) -> Result<Session> {
     let session = Session::new(
         SessionConfig {
             device_id: device_id(&format!("{}-cli", cfg.device_name)),
-            client_id: cfg.client_id.clone(),
+            client_id: DEFAULT_CLIENT_ID.to_string(),
             ..SessionConfig::default()
         },
-        Cache::new(Some(paths.cache_dir.join("session")), None, None, None).ok(),
+        Cache::new(Some(session_dir(paths)), None, None, None).ok(),
     );
-    session
-        .connect(Credentials::with_access_token(access_token), true)
-        .await?;
+    let (creds, cached) = streaming_credentials(cfg, paths, web_token, false).await?;
+    if session.connect(creds, true).await.is_ok() {
+        return Ok(session);
+    }
+    if !cached {
+        anyhow::bail!("could not connect to Spotify (a Premium account is required)");
+    }
+    forget_streaming(paths);
+    let (creds, _) = streaming_credentials(cfg, paths, web_token, true).await?;
+    session.connect(creds, true).await?;
     Ok(session)
+}
+
+pub fn session_dir(paths: &Paths) -> std::path::PathBuf {
+    paths.cache_dir.join("session")
+}
+
+/// Drop cached streaming credentials (e.g. after they stop working).
+pub fn forget_streaming(paths: &Paths) {
+    let _ = std::fs::remove_file(session_dir(paths).join("credentials.json"));
+}
+
+/// Credentials for the audio session. Returns `(credentials, from_cache)`.
+///
+/// librespot caches reusable credentials after the first connect. Without
+/// them we reuse the Web API token when it was issued to Spotify's own client
+/// ID; with a custom client ID we need a separate one-time login.
+pub async fn streaming_credentials(
+    cfg: &Config,
+    paths: &Paths,
+    web_token: &str,
+    fresh: bool,
+) -> Result<(Credentials, bool)> {
+    if !fresh {
+        let cached = Cache::new(Some(session_dir(paths)), None, None, None)
+            .ok()
+            .and_then(|c| c.credentials());
+        if let Some(c) = cached {
+            return Ok((c, true));
+        }
+    }
+    if cfg.client_id == DEFAULT_CLIENT_ID {
+        return Ok((Credentials::with_access_token(web_token), false));
+    }
+    let token = auth::streaming_login(cfg).await?;
+    Ok((Credentials::with_access_token(token), false))
 }
