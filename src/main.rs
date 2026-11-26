@@ -7,6 +7,9 @@ mod jam;
 mod oauth;
 mod ui;
 mod visualizer;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod webhost;
+mod webplayer;
 
 use anyhow::{Result, bail};
 use api::{Api, TimeRange, fmt_ms};
@@ -53,6 +56,9 @@ enum Cmd {
     Playlists,
     /// List Spotify Connect devices
     Devices,
+    /// Run only the audio engine, without the TUI (for debugging or as a speaker)
+    #[command(hide = true)]
+    Daemon,
     /// Spotify Jam: start, join, leave or show a shared session (experimental)
     Jam {
         #[command(subcommand)]
@@ -78,9 +84,30 @@ enum JamCmd {
     Leave,
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run().await {
+fn main() {
+    // The web player host owns the main thread (the macOS UI event loop must
+    // run there), so dispatch it before starting the async runtime.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("player-host") {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        webhost::run(
+            args.get(2)
+                .map(String::as_str)
+                .unwrap_or("https://irie.frandika.com/player"),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            println!(
+                r#"{{"type":"error","kind":"host","message":"the web player isn't available on this platform"}}"#
+            );
+            std::process::exit(1);
+        }
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    if let Err(e) = rt.block_on(run()) {
         eprintln!("irie: {e:#}");
         std::process::exit(1);
     }
@@ -89,7 +116,11 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::new()?;
-    let cfg = Config::load(&paths)?;
+    let mut cfg = Config::load(&paths)?;
+    if let Ok(name) = std::env::var("IRIE_DEVICE_NAME") {
+        cfg.device_name = name;
+    }
+    init_logging(&paths, cli.cmd.is_some());
 
     match cli.cmd {
         Some(Cmd::Login) => {
@@ -109,6 +140,7 @@ async fn run() -> Result<()> {
 
     match cli.cmd {
         None => tui(cfg, paths, api).await,
+        Some(Cmd::Daemon) => daemon(cfg, paths, api).await,
         Some(cmd) => command(cmd, &cfg, &paths, &api).await,
     }
 }
@@ -281,7 +313,7 @@ async fn command(cmd: Cmd, cfg: &Config, paths: &Paths, api: &Api) -> Result<()>
                 },
             }
         }
-        Cmd::Login | Cmd::Logout => unreachable!(),
+        Cmd::Login | Cmd::Logout | Cmd::Daemon => unreachable!(),
     }
     Ok(())
 }
@@ -299,55 +331,49 @@ fn no_device_hint(e: anyhow::Error) -> anyhow::Error {
 async fn tui(cfg: Config, paths: Paths, api: Api) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
 
-    // Start the audio engine before taking over the terminal so errors are readable.
-    eprintln!("Connecting to Spotify…");
-    let token = api.auth().access_token().await?;
-    let mut started = Err(anyhow::anyhow!("not started"));
-    for fresh in [false, true] {
-        let (creds, cached) = engine::streaming_credentials(&cfg, &paths, &token, fresh).await?;
-        started = engine::Engine::start(&cfg, &paths, creds).await;
-        if started.is_ok() || !cached {
-            break;
-        }
-        // Cached credentials went stale: forget them and log in again.
-        engine::forget_streaming(&paths);
-    }
-    let engine = match started {
-        Ok((engine, task)) => {
-            let tx2 = tx.clone();
+    let backend = cfg.backend.resolve();
+    let mut engine = None;
+    let mut speaker = None;
+    match backend {
+        config::Backend::Web => {
+            match webplayer::WebSpeaker::spawn(
+                &cfg.player_url,
+                &cfg.device_name,
+                api.auth().clone(),
+                tx.clone(),
+            )
+            .await
+            {
+                Ok(s) => speaker = Some(s),
+                Err(e) => {
+                    eprintln!("warning: {e:#}\nContinuing as a remote control only.");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+            // Jam talks to Spotify's internal API through a session; connect one in the background.
+            let (cfg2, paths2, auth, tx2) =
+                (cfg.clone(), Paths::new()?, api.auth().clone(), tx.clone());
             tokio::spawn(async move {
-                task.await;
-                let _ = tx2.send(Msg::EngineDown(
-                    "Audio engine disconnected; restart irie to play here".into(),
-                ));
-            });
-            let engine = Arc::new(engine);
-            let mut events = engine.events();
-            let tx3 = tx.clone();
-            tokio::spawn(async move {
-                while let Some(ev) = events.recv().await {
-                    if tx3.send(Msg::Player(ev)).is_err() {
-                        break;
-                    }
+                let Ok(token) = auth.access_token().await else {
+                    return;
+                };
+                if let Ok(session) = engine::connect_session(&cfg2, &paths2, &token).await {
+                    let _ = tx2.send(Msg::JamReady(Arc::new(jam::Jam::new(session))));
                 }
             });
-            Some(engine)
         }
-        Err(e) => {
-            eprintln!("warning: {e:#}\nContinuing as a remote control only.");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            None
-        }
-    };
+        _ => engine = start_librespot(&cfg, &paths, &api, &tx).await?,
+    }
 
     let mut app = App::new(
         api,
         engine.clone(),
+        speaker.clone(),
         cfg.device_name.clone(),
         cfg.autoconnect,
         tx.clone(),
     );
-    if engine.is_none() {
+    if engine.is_none() && speaker.is_none() {
         app.engine_error = Some("engine offline".into());
     }
     app.startup();
@@ -383,5 +409,110 @@ async fn tui(cfg: Config, paths: Paths, api: Api) -> Result<()> {
         e.shutdown();
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    if let Some(s) = speaker {
+        s.shutdown().await;
+    }
     result
+}
+
+async fn start_librespot(
+    cfg: &Config,
+    paths: &Paths,
+    api: &Api,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+) -> Result<Option<Arc<engine::Engine>>> {
+    eprintln!("Connecting to Spotify…");
+    let token = api.auth().access_token().await?;
+    let mut started = Err(anyhow::anyhow!("not started"));
+    for fresh in [false, true] {
+        let (creds, cached) = engine::streaming_credentials(cfg, paths, &token, fresh).await?;
+        started = engine::Engine::start(cfg, paths, creds).await;
+        if started.is_ok() || !cached {
+            break;
+        }
+        // Cached credentials went stale: forget them and log in again.
+        engine::forget_streaming(paths);
+    }
+    Ok(match started {
+        Ok((engine, task)) => {
+            let tx2 = tx.clone();
+            tokio::spawn(async move {
+                task.await;
+                let _ = tx2.send(Msg::EngineDown(
+                    "Audio engine disconnected; restart irie to play here".into(),
+                ));
+            });
+            let engine = Arc::new(engine);
+            let mut events = engine.events();
+            let tx3 = tx.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = events.recv().await {
+                    if tx3.send(Msg::Player(ev)).is_err() {
+                        break;
+                    }
+                }
+            });
+            Some(engine)
+        }
+        Err(e) => {
+            eprintln!("warning: {e:#}\nContinuing as a remote control only.");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            None
+        }
+    })
+}
+
+/// `IRIE_LOG=debug` (or any env_logger filter) writes logs to irie's cache
+/// directory; CLI subcommands log to stderr instead.
+fn init_logging(paths: &Paths, to_stderr: bool) {
+    let Ok(filter) = std::env::var("IRIE_LOG") else {
+        return;
+    };
+    let mut b = env_logger::Builder::new();
+    b.parse_filters(&filter).format_timestamp_millis();
+    if !to_stderr {
+        let path = paths.cache_dir.join("irie.log");
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(f) => {
+                b.target(env_logger::Target::Pipe(Box::new(f)));
+                eprintln!("Logging to {}", path.display());
+            }
+            Err(_) => return,
+        }
+    }
+    let _ = b.try_init();
+}
+
+async fn daemon(cfg: Config, paths: Paths, api: Api) -> Result<()> {
+    let token = api.auth().access_token().await?;
+    let (creds, _) = engine::streaming_credentials(&cfg, &paths, &token, false).await?;
+    let (engine, task) = engine::Engine::start(&cfg, &paths, creds).await?;
+    println!(
+        "device \"{}\" id={} ready",
+        cfg.device_name, engine.device_id
+    );
+    let mut events = engine.events();
+    let tap = engine.tap.clone();
+    let mut buf = vec![0f32; 4096];
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tokio::pin!(task);
+    loop {
+        tokio::select! {
+            Some(ev) = events.recv() => println!("event: {ev:?}"),
+            _ = tick.tick() => {
+                if tap.snapshot(&mut buf) {
+                    let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
+                    println!("audio: rms={rms:.4} volume={}%", engine.volume_pct());
+                }
+            }
+            _ = &mut task => { println!("engine stopped"); break; }
+            _ = tokio::signal::ctrl_c() => break,
+        }
+    }
+    engine.shutdown();
+    Ok(())
 }

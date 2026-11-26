@@ -177,7 +177,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         (_, Some(_)) => ("audio engine offline".to_string(), RED),
         (Some(d), _) if app.is_local() => (format!("♪ {}", d.name), GREEN),
         (Some(d), _) => (format!("⇢ {}", d.name), GOLD),
-        (None, _) if app.engine.is_some() => (format!("♪ {} ready", app.device_name), DIM),
+        (None, _) if app.device_id.is_some() => (format!("♪ {} ready", app.device_name), DIM),
+        (None, _) if app.speaker.is_some() => (format!("♪ starting {}…", app.device_name), DIM),
         (None, _) => ("no active device".to_string(), DIM),
     };
     let jam = if app.jam.is_some() { "◉ jam  " } else { "" };
@@ -243,6 +244,23 @@ fn draw_now(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Line::from(Span::styled(
                 "The visualizer reacts to audio played by irie. Press d to listen here.",
+                Style::new().fg(DIM),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+        f.render_widget(msg, viz);
+        return;
+    }
+    if app.visualizer_unavailable() {
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "♪ playing through irie's web player",
+                Style::new().fg(GREEN),
+            )),
+            Line::from(Span::styled(
+                "The visualizer needs audio capture, which isn't set up for the web player yet.",
                 Style::new().fg(DIM),
             )),
         ])
@@ -678,10 +696,10 @@ fn draw_jam(f: &mut Frame, app: &mut App, area: Rect) {
         ])
     };
     let mut lines = vec![Line::from("")];
-    if app.engine.is_none() {
+    if app.jam_client.is_none() {
         lines.push(Line::from(Span::styled(
-            "Jam needs the audio engine, which isn't running.",
-            Style::new().fg(RED),
+            "Connecting to Spotify…",
+            Style::new().fg(DIM),
         )));
     } else if app.jam_busy {
         lines.push(Line::from(Span::styled(
@@ -967,7 +985,7 @@ mod tests {
     async fn renders_every_view_at_several_sizes() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let api = Api::new(Arc::new(crate::auth::Auth::for_test()));
-        let mut app = App::new(api, None, "irie".into(), false, tx);
+        let mut app = App::new(api, None, None, "irie".into(), false, tx);
         let track = Track {
             name: "Three Little Birds".into(),
             uri: "spotify:track:1".into(),

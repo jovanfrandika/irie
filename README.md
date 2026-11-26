@@ -22,12 +22,15 @@ and start or join a Spotify Jam without leaving the terminal.
 
 ## Features
 
-- **Listen**: irie streams audio itself (via [librespot](https://github.com/librespot-org/librespot))
-  at up to 320 kbps, and shows up as a device in every Spotify app, so your
-  phone can control it too. You can also move playback to any other device (`d`).
+- **Listen**: irie plays audio itself and shows up as a device in every Spotify
+  app, so your phone can control it too. On macOS and Windows it uses Spotify's
+  official Web Playback SDK in an invisible system web view (no Spotify app, no
+  Chrome, about 170 MB in total). On Linux it uses
+  [librespot](https://github.com/librespot-org/librespot). You can also move
+  playback to any other device (`d`).
 - **Visualize**: a real FFT of the PCM that's playing, in three styles (spectrum
   bars, mirrored bars, oscilloscope), adjusted for the audio output delay so it
-  stays in sync with what you hear.
+  stays in sync with what you hear. This currently needs the librespot backend.
 - **Library**: your playlists and Liked Songs. Open one, play from any track, or
   queue tracks.
 - **Search**: tracks, artists, albums and playlists.
@@ -43,6 +46,7 @@ and start or join a Spotify Jam without leaving the terminal.
 - **Spotify Premium**. Spotify only allows Premium accounts to stream through
   third-party Connect clients.
 - Rust 1.85 or newer (the repo pins 1.90 via `rust-toolchain.toml`).
+- Windows: the WebView2 runtime, which comes with Windows 10 and 11.
 - Linux only: ALSA headers (`libasound2-dev` / `alsa-lib-devel`).
 
 ## Install
@@ -139,8 +143,8 @@ own registered app:
 
 1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard),
    log in and accept the terms.
-2. **Create app**: any name and description. Under **APIs used**, tick only
-   **Web API**. Add both of these **Redirect URIs**:
+2. **Create app**: any name and description. Under **APIs used**, tick
+   **Web API** and **Web Playback SDK**. Add both of these **Redirect URIs**:
    - `https://irie.frandika.com/callback`: a page that hands the login back
      to irie, and also works when irie runs over SSH (you paste the link)
    - `http://127.0.0.1:8989/login`: irie's local listener
@@ -158,12 +162,26 @@ own registered app:
 Apps in Spotify's development mode only work for the accounts you add under
 **User Management** in the dashboard (your own account works automatically).
 
+## Audio backends
+
+Set `backend` in the config:
+
+| Backend | Platforms | How it plays |
+| --- | --- | --- |
+| `auto` (default) | all | `web` on macOS and Windows, `librespot` on Linux |
+| `web` | macOS, Windows | Spotify's Web Playback SDK in a hidden system web view (WebKit or WebView2), hosted at `https://irie.frandika.com/player` |
+| `librespot` | all | librespot, an open-source implementation of Spotify Connect. It enables the visualizer, but Spotify now refuses its decryption keys for many accounts (error `audio key 0 1`), so tracks stay silent |
+
+The web backend runs as a small helper process (`irie player-host`) with no
+window or Dock icon, and it exits when irie exits. If you use your own Spotify
+app, enable **Web Playback SDK** for it in the developer dashboard.
+
 ## Notes and limitations
 
 - **Visualizer**: Spotify no longer offers audio analysis to third-party apps,
-  so irie analyses the audio it decodes itself. That means the visualizer only
-  works when irie is the device that's playing. When music plays elsewhere, press
-  `d` to move it to irie.
+  so irie analyses the audio it decodes itself. That only works with the
+  librespot backend, while irie is the device that's playing. The web player's
+  audio is DRM-protected, so the page can't read it.
 - **Jam**: Spotify has no public API for Jams. irie uses the same internal
   endpoints as the official apps, so this may stop working whenever Spotify
   changes them. Friends join with the invite link from their own Spotify app.

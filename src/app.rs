@@ -6,6 +6,7 @@ use crate::api::{
 use crate::engine::Engine;
 use crate::jam::{self, Jam, JamSession};
 use crate::visualizer::{self, Analyzer, FFT_SIZE};
+use crate::webplayer::{SpeakerEvent, WebSpeaker};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use librespot_playback::player::PlayerEvent;
@@ -97,6 +98,8 @@ pub enum Msg {
     Info(String),
     Error(String),
     EngineDown(String),
+    Speaker(SpeakerEvent),
+    JamReady(Arc<Jam>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +110,7 @@ pub enum Prompt {
 pub struct App {
     pub api: Api,
     pub engine: Option<Arc<Engine>>,
+    pub speaker: Option<Arc<WebSpeaker>>,
     pub jam_client: Option<Arc<Jam>>,
     pub device_id: Option<String>,
     pub device_name: String,
@@ -152,6 +156,7 @@ pub struct App {
     pub viz_bands: usize,
     autoconnected: bool,
     autoconnect: bool,
+    playback_loaded: bool,
 }
 
 fn sel(state: &mut TableState, len: usize, delta: isize) {
@@ -167,6 +172,7 @@ impl App {
     pub fn new(
         api: Api,
         engine: Option<Arc<Engine>>,
+        speaker: Option<Arc<WebSpeaker>>,
         device_name: String,
         autoconnect: bool,
         tx: UnboundedSender<Msg>,
@@ -178,6 +184,7 @@ impl App {
         Self {
             api,
             engine,
+            speaker,
             jam_client,
             device_id,
             device_name,
@@ -215,6 +222,7 @@ impl App {
             viz_bands: 48,
             autoconnected: false,
             autoconnect,
+            playback_loaded: false,
         }
     }
 
@@ -369,6 +377,9 @@ impl App {
             let _ = e.spirc.play_pause();
             return;
         }
+        if self.speaker_cmd("toggle", serde_json::Value::Null) {
+            return;
+        }
         let api = self.api.clone();
         if self.playback.is_none() {
             // Nothing active anywhere: wake up our own device.
@@ -394,6 +405,12 @@ impl App {
             };
             return;
         }
+        if self.speaker_cmd(
+            if forward { "next" } else { "prev" },
+            serde_json::Value::Null,
+        ) {
+            return;
+        }
         let api = self.api.clone();
         if forward {
             self.command("next", async move { api.next().await });
@@ -411,6 +428,9 @@ impl App {
             && let Some(e) = &self.engine
         {
             let _ = e.spirc.set_position_ms(pos as u32);
+            return;
+        }
+        if self.speaker_cmd("seek", serde_json::json!(pos)) {
             return;
         }
         let api = self.api.clone();
@@ -595,7 +615,7 @@ impl App {
 
     fn jam_start(&mut self) {
         let Some(j) = self.jam_client.clone() else {
-            return self.error("Jam needs the audio engine");
+            return self.error("Still connecting to Spotify for Jam, try again in a moment");
         };
         self.jam_busy = true;
         // Hosting a Jam needs something playing; make sure it's on irie.
@@ -605,7 +625,7 @@ impl App {
 
     fn jam_join(&mut self, link: String) {
         let Some(j) = self.jam_client.clone() else {
-            return self.error("Jam needs the audio engine");
+            return self.error("Still connecting to Spotify for Jam, try again in a moment");
         };
         self.jam_busy = true;
         self.spawn(async move { Ok(Msg::Jam(Some(j.join(&link).await?))) });
@@ -622,6 +642,54 @@ impl App {
         });
     }
 
+    /// Once we know both the playback state and our device ID, take over
+    /// playback if nothing else is playing.
+    fn maybe_autoconnect(&mut self) {
+        if !self.autoconnect || self.autoconnected || !self.playback_loaded {
+            return;
+        }
+        let Some(id) = self.device_id.clone() else {
+            return;
+        };
+        self.autoconnected = true;
+        let idle = self.playback.as_ref().is_none_or(|p| !p.is_playing);
+        if !idle {
+            return;
+        }
+        let api = self.api.clone();
+        // The device needs a moment to show up in Spotify's device list.
+        self.spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                if api.transfer(&id, false).await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    return Ok(Msg::RefreshSoon);
+                }
+            }
+            Ok(Msg::Info("Press d to pick a device".into()))
+        });
+    }
+
+    /// Send a command straight to the local web player when it's the active
+    /// device (instant, no round trip through Spotify). Returns false otherwise.
+    fn speaker_cmd(&self, cmd: &'static str, arg: serde_json::Value) -> bool {
+        let Some(sp) = self.speaker.clone().filter(|_| self.is_local()) else {
+            return false;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            sp.command(cmd, arg).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = tx.send(Msg::RefreshSoon);
+        });
+        true
+    }
+
+    /// True when audio comes from irie but there's no PCM to analyse.
+    pub fn visualizer_unavailable(&self) -> bool {
+        self.engine.is_none() && self.speaker.is_some() && self.is_local()
+    }
+
     // ---------- events ----------
 
     pub fn on_msg(&mut self, msg: Msg) {
@@ -630,24 +698,8 @@ impl App {
                 self.playback = pb;
                 self.playback_at = Instant::now();
                 self.pending_seek = None;
-                if self.autoconnect && !self.autoconnected {
-                    self.autoconnected = true;
-                    let idle = self.playback.as_ref().is_none_or(|p| !p.is_playing);
-                    if idle && let Some(id) = self.device_id.clone() {
-                        let api = self.api.clone();
-                        // The device needs a moment to show up in Spotify's device list.
-                        self.spawn(async move {
-                            for _ in 0..6 {
-                                tokio::time::sleep(Duration::from_millis(800)).await;
-                                if api.transfer(&id, false).await.is_ok() {
-                                    tokio::time::sleep(Duration::from_millis(400)).await;
-                                    return Ok(Msg::RefreshSoon);
-                                }
-                            }
-                            Ok(Msg::Info("Press d to pick a device".into()))
-                        });
-                    }
-                }
+                self.playback_loaded = true;
+                self.maybe_autoconnect();
             }
             Msg::Me(u) => self.me = Some(u),
             Msg::Playlists(ps) => {
@@ -732,6 +784,39 @@ impl App {
                     v.loading = false;
                 }
                 self.error(s);
+            }
+            Msg::Speaker(ev) => match ev {
+                SpeakerEvent::Ready(id) => {
+                    self.device_id = Some(id);
+                    self.engine_error = None;
+                    self.info(format!("{} is ready to play", self.device_name));
+                    self.maybe_autoconnect();
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        let _ = tx.send(Msg::RefreshSoon);
+                    });
+                }
+                SpeakerEvent::NotReady => self.error("Web player went offline; reconnecting…"),
+                SpeakerEvent::Changed => {
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let _ = tx.send(Msg::RefreshSoon);
+                    });
+                }
+                SpeakerEvent::Error(e) => self.error(e),
+                SpeakerEvent::Exited => {
+                    self.engine_error = Some("web player stopped".into());
+                    self.device_id = None;
+                    self.error("The web player stopped; restart irie to play here");
+                }
+            },
+            Msg::JamReady(j) => {
+                self.jam_client = Some(j);
+                if self.tab == Tab::Jam {
+                    self.refresh_jam();
+                }
             }
             Msg::EngineDown(s) => {
                 self.engine_error = Some(s.clone());

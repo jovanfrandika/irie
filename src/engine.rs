@@ -153,7 +153,12 @@ impl Engine {
         let session = Session::new(session_config, cache);
 
         let mixer_fn = mixer::find(None).context("no software mixer available")?;
-        let mixer = mixer_fn(MixerConfig::default())?;
+        // librespot's default 60 dB log curve makes 60% sound like 6%; a
+        // gentler curve keeps the slider closer to what you hear.
+        let mixer = mixer_fn(MixerConfig {
+            volume_ctrl: librespot_playback::config::VolumeCtrl::Log(30.0),
+            ..MixerConfig::default()
+        })?;
 
         let player_config = PlayerConfig {
             bitrate: match cfg.bitrate {

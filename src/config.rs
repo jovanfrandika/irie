@@ -32,6 +32,30 @@ pub struct Config {
     pub normalisation: bool,
     /// Take over playback on startup when nothing else is playing.
     pub autoconnect: bool,
+    /// How irie plays audio: "auto", "web" (Spotify's Web Playback SDK in the
+    /// system web view) or "librespot".
+    pub backend: Backend,
+    /// Page that hosts the web player.
+    pub player_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Auto,
+    Web,
+    Librespot,
+}
+
+impl Backend {
+    /// The backend that will actually be used on this platform.
+    pub fn resolve(self) -> Backend {
+        match self {
+            Backend::Auto if cfg!(any(target_os = "macos", target_os = "windows")) => Backend::Web,
+            Backend::Auto => Backend::Librespot,
+            b => b,
+        }
+    }
 }
 
 impl Default for Config {
@@ -46,6 +70,8 @@ impl Default for Config {
             audio_cache_mb: 1024,
             normalisation: false,
             autoconnect: true,
+            backend: Backend::Auto,
+            player_url: "https://irie.frandika.com/player".into(),
         }
     }
 }
