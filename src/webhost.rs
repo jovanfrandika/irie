@@ -54,7 +54,7 @@ pub fn run(url: &str) -> ! {
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
-        .with_visible(false)
+        .with_visible(std::env::var_os("IRIE_PLAYER_VISIBLE").is_some())
         .with_title("irie player")
         .build(&event_loop)
         .unwrap_or_else(|e| fail(&format!("could not create player window: {e}")));
@@ -62,6 +62,9 @@ pub fn run(url: &str) -> ! {
     let mut wb = WebViewBuilder::new()
         .with_url(url)
         .with_autoplay(true)
+        // The window is never shown, and WebKit throttles then suspends hidden
+        // pages, which freezes the FairPlay license request mid-flight (silence).
+        .with_background_throttling(wry::BackgroundThrottlingPolicy::Disabled)
         .with_devtools(false)
         .with_ipc_handler(|req| {
             let mut out = std::io::stdout().lock();
@@ -70,6 +73,9 @@ pub fn run(url: &str) -> ! {
         });
     if cfg!(target_os = "macos") {
         wb = wb.with_user_agent(SAFARI_UA);
+    }
+    if std::env::var_os("IRIE_PLAYER_DEBUG").is_some() {
+        wb = wb.with_initialization_script_for_main_only(include_str!("webhost_debug.js"), false);
     }
     let webview = wb
         .build(&window)
