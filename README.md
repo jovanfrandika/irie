@@ -139,12 +139,16 @@ own registered app:
 
 1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard),
    log in and accept the terms.
-2. **Create app**: any name and description. Set **Redirect URI** to exactly
-   `http://127.0.0.1:8989/login` and tick **Web API**.
+2. **Create app**: any name and description. Under **APIs used**, tick only
+   **Web API**. Add both of these **Redirect URIs**:
+   - `https://irie.frandika.com/callback`: a page that hands the login back
+     to irie, and also works when irie runs over SSH (you paste the link)
+   - `http://127.0.0.1:8989/login`: irie's local listener
 3. Copy the **Client ID**. You don't need the client secret, because irie uses PKCE.
 4. Add it to your config:
    ```toml
    client_id = "your-client-id"
+   redirect_uri = "https://irie.frandika.com/callback"   # optional; defaults to the local listener
    ```
 5. Run `irie login`, then `irie`. The first time, irie opens a second browser
    tab for a one-time *streaming* login. Spotify only allows audio streaming

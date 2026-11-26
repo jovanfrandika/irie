@@ -20,8 +20,12 @@ pub struct Config {
     pub initial_volume: u8,
     /// OAuth client ID. Override with your own app's ID if you prefer.
     pub client_id: String,
-    /// Local port for the OAuth redirect (http://127.0.0.1:<port>/login).
+    /// Local port irie listens on for the login callback.
     pub oauth_port: u16,
+    /// OAuth redirect URI registered on your app. Defaults to
+    /// http://127.0.0.1:<oauth_port>/login; can be a web page such as
+    /// https://irie.frandika.com/callback that forwards to irie.
+    pub redirect_uri: Option<String>,
     /// Max size of the audio cache in megabytes (0 disables the cache).
     pub audio_cache_mb: u64,
     /// Volume normalisation.
@@ -38,6 +42,7 @@ impl Default for Config {
             initial_volume: 60,
             client_id: DEFAULT_CLIENT_ID.into(),
             oauth_port: 8989,
+            redirect_uri: None,
             audio_cache_mb: 1024,
             normalisation: false,
             autoconnect: true,
@@ -86,6 +91,10 @@ impl Config {
     }
 
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/login", self.oauth_port)
+        match &self.redirect_uri {
+            // Spotify's own client only accepts loopback redirects.
+            Some(uri) if self.client_id != DEFAULT_CLIENT_ID => uri.clone(),
+            _ => format!("http://127.0.0.1:{}/login", self.oauth_port),
+        }
     }
 }

@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod engine;
 mod jam;
+mod oauth;
 mod ui;
 mod visualizer;
 

@@ -7,5 +7,6 @@ initial_volume = 60      # percent
 normalisation = false    # volume normalisation between tracks
 autoconnect = true       # take over playback on start if nothing is playing
 audio_cache_mb = 1024    # 0 disables the audio cache
-oauth_port = 8989        # local port for the login redirect
+oauth_port = 8989        # local port irie listens on for the login
+# redirect_uri = "https://irie.frandika.com/callback"  # only with your own client_id
 # client_id = "..."      # your own Spotify app for the Web API (see README)

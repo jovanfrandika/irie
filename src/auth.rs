@@ -1,9 +1,10 @@
 //! OAuth login and token refresh. The same token drives both the librespot
 //! session (audio) and the Spotify Web API (library, search, queue...).
 
+use crate::config::DEFAULT_CLIENT_ID;
 use crate::config::{Config, Paths};
+use crate::oauth;
 use anyhow::{Context, Result, bail};
-use librespot_oauth::{OAuthClient, OAuthClientBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,6 +36,13 @@ pub struct StoredToken {
     pub refresh_token: String,
     /// Unix timestamp (seconds) when the access token expires.
     pub expires_at: u64,
+    /// Client ID that issued the token (refreshes must use the same one).
+    #[serde(default = "default_client_id")]
+    pub client_id: String,
+}
+
+fn default_client_id() -> String {
+    DEFAULT_CLIENT_ID.to_string()
 }
 
 fn now() -> u64 {
@@ -45,19 +53,21 @@ fn now() -> u64 {
 }
 
 impl StoredToken {
-    fn from_oauth(t: librespot_oauth::OAuthToken, previous_refresh: Option<&str>) -> Self {
-        let ttl = t
-            .expires_at
-            .saturating_duration_since(std::time::Instant::now());
-        let refresh_token = if t.refresh_token.is_empty() {
-            previous_refresh.unwrap_or_default().to_string()
-        } else {
-            t.refresh_token
-        };
+    fn from_response(
+        t: oauth::TokenResponse,
+        client_id: &str,
+        previous_refresh: Option<&str>,
+    ) -> Self {
+        let refresh_token = t
+            .refresh_token
+            .filter(|r| !r.is_empty())
+            .or_else(|| previous_refresh.map(String::from))
+            .unwrap_or_default();
         Self {
             access_token: t.access_token,
             refresh_token,
-            expires_at: now() + ttl.as_secs(),
+            expires_at: now() + t.expires_in,
+            client_id: client_id.to_string(),
         }
     }
 
@@ -66,25 +76,20 @@ impl StoredToken {
     }
 }
 
-fn client(cfg: &Config, open_browser: bool) -> Result<OAuthClient> {
-    let mut b = OAuthClientBuilder::new(&cfg.client_id, &cfg.redirect_uri(), SCOPES.to_vec())
-        .with_custom_message(
-            "irie is logged in. You can close this tab and go back to your terminal.",
-        );
-    if open_browser {
-        b = b.open_in_browser();
-    }
-    Ok(b.build()?)
-}
-
 /// Run the interactive browser login and persist the token.
 pub async fn login(cfg: &Config, paths: &Paths) -> Result<StoredToken> {
-    println!("Opening your browser to log in to Spotify...");
-    let token = client(cfg, true)?
-        .get_access_token_async()
-        .await
-        .context("Spotify login failed")?;
-    let stored = StoredToken::from_oauth(token, None);
+    println!("Logging in to Spotify…");
+    let token = oauth::Login {
+        client_id: &cfg.client_id,
+        redirect_uri: &cfg.redirect_uri(),
+        scopes: SCOPES,
+        port: cfg.oauth_port,
+        success_message: "irie is logged in. You can close this tab and go back to your terminal.",
+    }
+    .run()
+    .await
+    .context("Spotify login failed")?;
+    let stored = StoredToken::from_response(token, &cfg.client_id, None);
     save(&paths.token_file(), &stored)?;
     println!("Logged in.");
     Ok(stored)
@@ -106,22 +111,22 @@ fn save(path: &PathBuf, t: &StoredToken) -> Result<()> {
 pub async fn streaming_login(cfg: &Config) -> Result<String> {
     eprintln!(
         "Your own client ID handles the Web API. Audio streaming needs a one-time\n\
-         login with Spotify's player client; opening your browser..."
+         login with Spotify's player client."
     );
-    let token = OAuthClientBuilder::new(
-        crate::config::DEFAULT_CLIENT_ID,
-        &cfg.redirect_uri(),
-        vec![
+    // Spotify's own client only accepts loopback redirects.
+    let token = oauth::Login {
+        client_id: DEFAULT_CLIENT_ID,
+        redirect_uri: &format!("http://127.0.0.1:{}/login", cfg.oauth_port),
+        scopes: &[
             "streaming",
             "user-read-private",
             "user-read-playback-state",
             "user-modify-playback-state",
         ],
-    )
-    .open_in_browser()
-    .with_custom_message("irie can now stream audio. You can close this tab.")
-    .build()?
-    .get_access_token_async()
+        port: cfg.oauth_port,
+        success_message: "irie can now stream audio. You can close this tab.",
+    }
+    .run()
     .await
     .context("streaming login failed")?;
     Ok(token.access_token)
@@ -146,7 +151,6 @@ pub fn logout(paths: &Paths) -> Result<()> {
 
 /// Shared, auto-refreshing token holder.
 pub struct Auth {
-    cfg: Config,
     path: PathBuf,
     token: Mutex<StoredToken>,
 }
@@ -155,11 +159,15 @@ impl Auth {
     /// Load a saved token, or run the browser login if there is none.
     pub async fn init(cfg: &Config, paths: &Paths) -> Result<Self> {
         let token = match load(paths) {
-            Some(t) => t,
+            // A token is tied to the client ID that issued it.
+            Some(t) if t.client_id == cfg.client_id => t,
+            Some(_) => {
+                println!("Your client_id changed, so you need to log in again.");
+                login(cfg, paths).await?
+            }
             None => login(cfg, paths).await?,
         };
         let auth = Self {
-            cfg: cfg.clone(),
             path: paths.token_file(),
             token: Mutex::new(token),
         };
@@ -187,12 +195,10 @@ impl Auth {
         }
         let mut last_err = None;
         for attempt in 0..3 {
-            match client(&self.cfg, false)?
-                .refresh_token_async(&t.refresh_token)
-                .await
-            {
+            match oauth::refresh(&t.client_id, &t.refresh_token).await {
                 Ok(new) => {
-                    let stored = StoredToken::from_oauth(new, Some(&t.refresh_token));
+                    let stored =
+                        StoredToken::from_response(new, &t.client_id, Some(&t.refresh_token));
                     save(&self.path, &stored)?;
                     return Ok(stored);
                 }
@@ -213,12 +219,12 @@ impl Auth {
 impl Auth {
     pub fn for_test() -> Self {
         Self {
-            cfg: Config::default(),
             path: std::env::temp_dir().join("irie-test-token.json"),
             token: Mutex::new(StoredToken {
                 access_token: "x".into(),
                 refresh_token: "y".into(),
                 expires_at: u64::MAX,
+                client_id: DEFAULT_CLIENT_ID.into(),
             }),
         }
     }
