@@ -47,7 +47,13 @@ and start or join a Spotify Jam without leaving the terminal.
 
 ## Install
 
-Download a prebuilt package for macOS, Linux or Windows from the
+With Homebrew (macOS and Linux):
+
+```sh
+brew install jovanfrandika/tap/irie
+```
+
+Or download a prebuilt package for macOS, Linux or Windows from the
 [latest release](https://github.com/jovanfrandika/irie/releases/latest), unpack
 it and put `irie` on your `PATH`:
 
