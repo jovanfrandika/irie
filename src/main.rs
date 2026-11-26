@@ -1,8 +1,11 @@
 mod api;
 mod app;
 mod auth;
+#[cfg(target_os = "macos")]
+mod capture;
 mod config;
 mod engine;
+mod hostproc;
 mod jam;
 mod oauth;
 mod ui;

@@ -33,6 +33,11 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        # A stable identifier, with the embedded Info.plist bound, so macOS shows
+        # "irie" in privacy prompts. Ad-hoc until a Developer ID is configured.
+        run: codesign --force --sign - --identifier com.frandika.irie "target/${{ matrix.target }}/release/irie"
       - name: Package
         shell: bash
         run: |

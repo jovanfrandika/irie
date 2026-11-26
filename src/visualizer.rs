@@ -45,6 +45,8 @@ pub struct Analyzer {
     /// Smoothed RMS loudness in 0..=1.
     pub level: f32,
     pub active: bool,
+    /// Sample rate of `samples`, in Hz.
+    pub sample_rate: f32,
 }
 
 impl Default for Analyzer {
@@ -64,6 +66,7 @@ impl Default for Analyzer {
             peaks: Vec::new(),
             level: 0.0,
             active: false,
+            sample_rate: SAMPLE_RATE,
         }
     }
 }
@@ -88,7 +91,7 @@ impl Analyzer {
             }
             self.fft.process(&mut self.buf);
 
-            let bin_hz = SAMPLE_RATE / FFT_SIZE as f32;
+            let bin_hz = self.sample_rate / FFT_SIZE as f32;
             let half = FFT_SIZE / 2;
             // Normalise so a full-scale sine reads ~0 dB (Hann window halves amplitude).
             let norm = 2.0 / (FFT_SIZE as f32 * 0.5);

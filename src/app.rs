@@ -157,6 +157,8 @@ pub struct App {
     autoconnected: bool,
     autoconnect: bool,
     playback_loaded: bool,
+    /// Why the web player's audio can't be visualized, if it can't.
+    pub capture_problem: Option<String>,
 }
 
 fn sel(state: &mut TableState, len: usize, delta: isize) {
@@ -223,6 +225,7 @@ impl App {
             autoconnected: false,
             autoconnect,
             playback_loaded: false,
+            capture_problem: None,
         }
     }
 
@@ -686,8 +689,14 @@ impl App {
     }
 
     /// True when audio comes from irie but there's no PCM to analyse.
-    pub fn visualizer_unavailable(&self) -> bool {
-        self.engine.is_none() && self.speaker.is_some() && self.is_local()
+    /// Returns a reason when the web player plays locally but its audio
+    /// can't be captured for the visualizer.
+    pub fn visualizer_unavailable(&self) -> Option<&str> {
+        if self.engine.is_some() || !self.is_local() {
+            return None;
+        }
+        self.speaker.as_ref()?;
+        self.capture_problem.as_deref()
     }
 
     // ---------- events ----------
@@ -806,6 +815,7 @@ impl App {
                     });
                 }
                 SpeakerEvent::Error(e) => self.error(e),
+                SpeakerEvent::Capture(problem) => self.capture_problem = problem,
                 SpeakerEvent::Exited => {
                     self.engine_error = Some("web player stopped".into());
                     self.device_id = None;
@@ -826,8 +836,16 @@ impl App {
     }
 
     pub fn on_tick(&mut self, bands: usize) {
-        let has_audio = match &self.engine {
-            Some(e) => e.tap.snapshot(&mut self.analyzer.samples[..FFT_SIZE]),
+        let tap = match (&self.engine, &self.speaker) {
+            (Some(e), _) => Some(e.tap.clone()),
+            (None, Some(sp)) => Some(sp.tap.clone()),
+            _ => None,
+        };
+        let has_audio = match tap {
+            Some(t) => {
+                self.analyzer.sample_rate = t.rate();
+                t.snapshot(&mut self.analyzer.samples[..FFT_SIZE])
+            }
             None => false,
         };
         self.analyzer.update(bands, has_audio);

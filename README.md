@@ -30,7 +30,8 @@ and start or join a Spotify Jam without leaving the terminal.
   playback to any other device (`d`).
 - **Visualize**: a real FFT of the PCM that's playing, in three styles (spectrum
   bars, mirrored bars, oscilloscope), adjusted for the audio output delay so it
-  stays in sync with what you hear. This currently needs the librespot backend.
+  stays in sync with what you hear. With the web player on macOS 14.2+, irie
+  listens to its own player's output, after asking once for permission.
 - **Library**: your playlists and Liked Songs. Open one, play from any track, or
   queue tracks.
 - **Search**: tracks, artists, albums and playlists.
@@ -179,9 +180,15 @@ app, enable **Web Playback SDK** for it in the developer dashboard.
 ## Notes and limitations
 
 - **Visualizer**: Spotify no longer offers audio analysis to third-party apps,
-  so irie analyses the audio it decodes itself. That only works with the
-  librespot backend, while irie is the device that's playing. The web player's
-  audio is DRM-protected, so the page can't read it.
+  so irie analyses the audio itself, while irie is the device that's playing.
+  - librespot: irie decodes the audio, so no permission is needed.
+  - Web player (macOS 14.2+): the page can't read DRM-protected audio, so irie
+    taps its own player's output with a Core Audio process tap. The first time,
+    macOS asks whether **irie** may record audio. It only ever listens to its own
+    player, and nothing is recorded or sent anywhere. If you dismissed the prompt,
+    allow irie under System Settings → Privacy & Security → Screen & System Audio
+    Recording → System Audio Recording Only. Until irie is signed with an Apple
+    Developer ID, macOS may ask again after an upgrade.
 - **Jam**: Spotify has no public API for Jams. irie uses the same internal
   endpoints as the official apps, so this may stop working whenever Spotify
   changes them. Friends join with the invite link from their own Spotify app.

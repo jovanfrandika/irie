@@ -3,18 +3,20 @@
 
 use crate::app::Msg;
 use crate::auth::Auth;
+use crate::engine::Tap;
+use crate::hostproc::{HostProc, Writer};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct WebSpeaker {
-    stdin: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    stdin: Mutex<Writer>,
+    proc: Mutex<HostProc>,
+    /// Captured audio output, for the visualizer.
+    pub tap: Tap,
 }
 
 /// Events from the player page that the app cares about.
@@ -24,6 +26,8 @@ pub enum SpeakerEvent {
     NotReady,
     Changed,
     Error(String),
+    /// `None` when capture works, otherwise why the visualizer can't run.
+    Capture(Option<String>),
     Exited,
 }
 
@@ -37,20 +41,37 @@ impl WebSpeaker {
         let exe = std::env::current_exe().context("could not find the irie executable")?;
         let mut full = url::Url::parse(url).context("invalid player_url")?;
         full.query_pairs_mut().append_pair("name", name);
-        let mut child = Command::new(exe)
-            .arg("player-host")
-            .arg(full.as_str())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
+        let mut proc = HostProc::spawn(&exe, &["player-host", full.as_str()])
             .context("could not start the web player")?;
-        let stdout = child.stdout.take().context("no stdout")?;
-        let stdin = child.stdin.take().context("no stdin")?;
+        let stdout = proc.stdout.take().context("no stdout")?;
+        let stdin = proc.stdin.take().context("no stdin")?;
+        let mut stderr = proc.stderr.take().context("no stderr")?;
+        let tap = Tap::realtime(48_000);
         let me = Arc::new(Self {
             stdin: Mutex::new(stdin),
-            child: Mutex::new(child),
+            proc: Mutex::new(proc),
+            tap: tap.clone(),
+        });
+
+        // stderr carries the captured audio: raw little-endian mono f32.
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut rest: Vec<u8> = Vec::new();
+            while let Ok(n) = stderr.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                rest.extend_from_slice(&buf[..n]);
+                let whole = rest.len() / 4 * 4;
+                let mono: Vec<f32> = rest[..whole]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                rest.drain(..whole);
+                if !mono.is_empty() {
+                    tap.push_mono(mono);
+                }
+            }
         });
 
         let weak = Arc::downgrade(&me);
@@ -108,7 +129,42 @@ impl WebSpeaker {
                         last_state = key;
                         SpeakerEvent::Changed
                     }
+                    "diag" => {
+                        log::info!("player diag: {line}");
+                        continue;
+                    }
                     "error" => SpeakerEvent::Error(friendly_error(&s("kind"), &s("message"))),
+                    "capture" => match {
+                        log::info!("visualizer capture: {v}");
+                        s("status")
+                    }
+                    .as_str()
+                    {
+                        "started" => {
+                            if let (Some(me), Some(rate)) =
+                                (weak.upgrade(), v.get("rate").and_then(Value::as_u64))
+                            {
+                                me.tap.set_rate(rate as u32);
+                            }
+                            continue;
+                        }
+                        "requesting" => SpeakerEvent::Capture(Some(
+                            "macOS should be asking whether irie may record audio (it only listens to its \
+                             own player, for the visualizer). Click Allow to see the visualizer."
+                                .into(),
+                        )),
+                        "ok" => SpeakerEvent::Capture(None),
+                        "denied" => SpeakerEvent::Capture(Some(
+                            "To see the visualizer, allow irie under System Settings → Privacy & Security → \
+                             Screen & System Audio Recording → System Audio Recording Only, then restart irie."
+                                .into(),
+                        )),
+                        "error" => SpeakerEvent::Capture(Some(format!(
+                            "The visualizer couldn't capture audio: {}",
+                            s("message")
+                        ))),
+                        _ => continue,
+                    },
                     _ => continue,
                 };
                 if tx.send(Msg::Speaker(ev)).is_err() {
@@ -134,13 +190,11 @@ impl WebSpeaker {
     pub async fn shutdown(&self) {
         // Closing stdin tells the host to disconnect and quit.
         let _ = self.stdin.lock().await.shutdown().await;
-        let mut child = self.child.lock().await;
-        if tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+        self.proc
+            .lock()
             .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-        }
+            .wait_or_kill(std::time::Duration::from_secs(2))
+            .await;
     }
 }
 

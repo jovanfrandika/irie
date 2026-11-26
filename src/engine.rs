@@ -33,17 +33,52 @@ struct Chunk {
 }
 
 /// A short, timestamped history of the mono PCM signal.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Tap {
     inner: Arc<Mutex<VecDeque<Chunk>>>,
+    rate: Arc<std::sync::atomic::AtomicU32>,
+    /// Chunks queued in the output after the point we capture from.
+    queued_chunks: f32,
+}
+
+impl Default for Tap {
+    /// A tap for librespot, which sees audio before the output buffer.
+    fn default() -> Self {
+        Self::new(SAMPLE_RATE as u32, SINK_QUEUE_PACKETS)
+    }
 }
 
 impl Tap {
+    pub fn new(rate: u32, queued_chunks: f32) -> Self {
+        Self {
+            inner: Arc::default(),
+            rate: Arc::new(std::sync::atomic::AtomicU32::new(rate)),
+            queued_chunks,
+        }
+    }
+
+    /// A tap fed with what's already playing (e.g. captured output).
+    pub fn realtime(rate: u32) -> Self {
+        Self::new(rate, 0.0)
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.rate.load(std::sync::atomic::Ordering::Relaxed) as f32
+    }
+
+    pub fn set_rate(&self, rate: u32) {
+        self.rate.store(rate, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn push(&self, interleaved: &[f64]) {
         let mono: Vec<f32> = interleaved
             .chunks_exact(2)
             .map(|f| ((f[0] + f[1]) * 0.5) as f32)
             .collect();
+        self.push_mono(mono);
+    }
+
+    pub fn push_mono(&self, mono: Vec<f32>) {
         let mut q = self.inner.lock().unwrap();
         q.push_back(Chunk {
             at: Instant::now(),
@@ -64,8 +99,8 @@ impl Tap {
     pub fn snapshot(&self, out: &mut [f32]) -> bool {
         let q = self.inner.lock().unwrap();
         let Some(last) = q.back() else { return false };
-        let chunk_secs = last.mono.len() as f32 / SAMPLE_RATE;
-        let delay = Duration::from_secs_f32((chunk_secs * SINK_QUEUE_PACKETS).min(1.5));
+        let chunk_secs = last.mono.len() as f32 / self.rate();
+        let delay = Duration::from_secs_f32((chunk_secs * self.queued_chunks).min(1.5));
         let now = Instant::now();
         if now.duration_since(last.at) > delay + Duration::from_millis(400) {
             return false; // nothing written for a while: silence

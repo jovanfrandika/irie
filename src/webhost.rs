@@ -81,6 +81,16 @@ pub fn run(url: &str) -> ! {
         .build(&window)
         .unwrap_or_else(|e| fail(&format!("could not create web view: {e}")));
 
+    // Capture our own audio output for the visualizer (raw mono f32 on stderr).
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        crate::capture::run(std::io::stderr(), |v| {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{v}");
+            let _ = out.flush();
+        })
+    });
+
     // Forward stdin lines into the page; quit when the parent goes away.
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {

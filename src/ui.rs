@@ -252,17 +252,14 @@ fn draw_now(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(msg, viz);
         return;
     }
-    if app.visualizer_unavailable() {
+    if let Some(reason) = app.visualizer_unavailable() {
         let msg = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
                 "♪ playing through irie's web player",
                 Style::new().fg(GREEN),
             )),
-            Line::from(Span::styled(
-                "The visualizer needs audio capture, which isn't set up for the web player yet.",
-                Style::new().fg(DIM),
-            )),
+            Line::from(Span::styled(reason.to_string(), Style::new().fg(DIM))),
         ])
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
