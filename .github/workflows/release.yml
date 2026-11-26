@@ -33,11 +33,52 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Sign (macOS)
+      - name: Sign and notarize (macOS)
         if: runner.os == 'macOS'
-        # A stable identifier, with the embedded Info.plist bound, so macOS shows
-        # "irie" in privacy prompts. Ad-hoc until a Developer ID is configured.
-        run: codesign --force --sign - --identifier com.frandika.irie "target/${{ matrix.target }}/release/irie"
+        # A stable identity (com.frandika.irie, with the embedded Info.plist bound)
+        # makes macOS show "irie" in privacy prompts. With a Developer ID the
+        # audio-capture permission also survives upgrades; without the secrets
+        # this falls back to an ad-hoc signature.
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/irie"
+          if [ -z "${MACOS_CERT_P12:-}" ]; then
+            echo "::notice::No Developer ID configured; signing ad-hoc."
+            codesign --force --sign - --identifier com.frandika.irie "$bin"
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw="$(uuidgen)"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          # Developer ID certificates chain to Apple's Developer ID G2 intermediate.
+          curl -sSfL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          [ -n "$identity" ] || { echo "::error::No Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          codesign --force --options runtime --timestamp --sign "$identity" --identifier com.frandika.irie "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+          if [ -n "${ASC_KEY_P8:-}" ]; then
+            printf '%s' "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+            ditto -c -k --keepParent "$bin" "$RUNNER_TEMP/irie-notarize.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/irie-notarize.zip" \
+              --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
+          else
+            echo "::warning::Signed with Developer ID but not notarized (ASC_KEY_P8 not set)."
+          fi
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$kc"
       - name: Package
         shell: bash
         run: |
